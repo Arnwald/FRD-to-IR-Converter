@@ -1,0 +1,19 @@
+[package]
+name = "frd-to-ir-converter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.33.2", features = ["persistence"] }
+egui = "0.33.2"
+egui_plot = "0.34.0"
+egui_extras = { version = "0.33.2", features = ["all_loaders"] }
+rustfft = "6.4"
+num-complex = "0.4"
+interp1d = "0.2"
+rfd = "0.16"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "frd-to-ir"
+path = "src/main.rs"

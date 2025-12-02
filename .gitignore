@@ -1,0 +1,19 @@
+# Mac stuff:
+.DS_Store
+Info.plist
+
+# trunk output folder
+dist
+
+# Rust compile target directories:
+target
+target_ra
+target_wasm
+
+# https://github.com/lycheeverse/lychee
+.lycheecache
+
+# Licenses
+*.html
+THIRDPARTY.yml
+THIRDPARTY_FULL.yml
