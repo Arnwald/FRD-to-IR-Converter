@@ -45,6 +45,8 @@ struct FrdToIrApp {
     delay_ms: f64,
     freq_min: f64,
     freq_max: f64,
+    ir_start_ms: f64,
+    ir_stop_ms: f64,
 
     // Extrapolation modes
     dc_extrap_rolloff: bool, // true = roll-off, false = constant
@@ -52,6 +54,7 @@ struct FrdToIrApp {
 
     // UI state
     wrap_phase: bool,
+    remove_delay_phase: bool,
     #[serde(skip)]
     file_name: String,
 }
@@ -69,9 +72,12 @@ impl Default for FrdToIrApp {
             delay_ms: 5.0,
             freq_min: 1.0,
             freq_max: 22000.0,
+            ir_start_ms: 0.0,
+            ir_stop_ms: 100.0,
             dc_extrap_rolloff: true,
             hf_extrap_rolloff: false,
             wrap_phase: false,
+            remove_delay_phase: false,
             file_name: String::new(),
         }
     }
@@ -114,7 +120,7 @@ impl FrdToIrApp {
         }
 
         // Convert FRD to IR with current parameters
-        let (mut ir, interp_mag, interp_phase) = impulse_from_frd(
+        let (ir, interp_mag, interp_phase) = impulse_from_frd(
             &self.frd_data,
             self.sample_rate,
             self.delay_ms,
@@ -122,19 +128,13 @@ impl FrdToIrApp {
             self.hf_extrap_rolloff,
         );
 
-        // Truncate IR to 2 seconds max to avoid slowing down the interface
-        let max_samples = (2.0 * self.sample_rate) as usize;
-        if ir.len() > max_samples {
-            ir.truncate(max_samples);
-        }
-
-        self.ir_data = ir;
+        self.ir_data = ir.clone();
         self.interp_mag_db = interp_mag;
         self.interp_phase_deg = interp_phase;
 
-        // Compute frequency response from IR
-        if !self.ir_data.is_empty() {
-            let freqz_data = freqz(&self.ir_data, self.sample_rate as usize, 8192);
+        // Compute frequency response from full IR (not truncated)
+        if !ir.is_empty() {
+            let freqz_data = freqz(&ir, self.sample_rate as usize, (1 << 17) as usize);
             self.reconstructed_mag_db = freqz_data.iter().map(|(f, m, _)| (*f, *m)).collect();
             self.reconstructed_phase_deg = freqz_data.iter().map(|(f, _, p)| (*f, *p)).collect();
         }
@@ -177,6 +177,17 @@ impl FrdToIrApp {
         }
 
         unwrapped
+    }
+
+    fn remove_linear_phase(data: &[(f64, f64)], delay_ms: f64) -> Vec<(f64, f64)> {
+        // Remove the linear phase component corresponding to the delay
+        // Phase shift (in degrees) = -360 * frequency * delay
+        data.iter()
+            .map(|(f, p)| {
+                let delay_phase_deg = -360.0 * f * delay_ms / 1000.0;
+                (*f, p - delay_phase_deg)
+            })
+            .collect()
     }
 }
 
@@ -250,7 +261,7 @@ impl eframe::App for FrdToIrApp {
                     .add(
                         egui::DragValue::new(&mut self.delay_ms)
                             .speed(0.1)
-                            .range(0.0..=100.0)
+                            .range(0.0..=500.0)
                             .suffix(" ms"),
                     )
                     .changed();
@@ -304,6 +315,29 @@ impl eframe::App for FrdToIrApp {
 
                 ui.add_space(20.0);
 
+                ui.label("IR Start:");
+                ui.add(
+                    egui::DragValue::new(&mut self.ir_start_ms)
+                        .speed(0.1)
+                        .range(0.0..=self.ir_stop_ms - 0.1)
+                        .suffix(" ms"),
+                );
+
+                ui.add_space(10.0);
+
+                ui.label("IR Stop:");
+                let max_ir_time_ms = (self.ir_data.len() as f64 * 1000.0) / self.sample_rate;
+                ui.add(
+                    egui::DragValue::new(&mut self.ir_stop_ms)
+                        .speed(1.0)
+                        .range(self.ir_start_ms + 0.1..=max_ir_time_ms)
+                        .suffix(" ms"),
+                );
+
+                ui.add_space(20.0);
+
+                ui.label("Freq Min:");
+
                 ui.label("Freq Min:");
                 ui.add(
                     egui::DragValue::new(&mut self.freq_min)
@@ -324,6 +358,16 @@ impl eframe::App for FrdToIrApp {
 
                 if sr_changed || delay_changed || dc_changed || hf_changed {
                     self.update_conversion();
+                }
+            });
+
+            // Second row of controls
+            ui.horizontal(|ui| {
+                if ui
+                    .toggle_value(&mut self.remove_delay_phase, "Remove Delay Phase")
+                    .changed()
+                {
+                    // No need to reconvert, just affects display
                 }
             });
 
@@ -507,20 +551,25 @@ impl eframe::App for FrdToIrApp {
                 })
                 .show(ui, |plot_ui| {
                     if !self.ir_data.is_empty() {
-                        // Truncate display to 100ms max for clarity
-                        let max_display_samples =
-                            ((0.1 * self.sample_rate) as usize).min(self.ir_data.len());
-                        let ir_points: PlotPoints = self
-                            .ir_data
-                            .iter()
-                            .take(max_display_samples)
-                            .enumerate()
-                            .map(|(i, v)| {
-                                let t_ms = i as f64 * 1000.0 / self.sample_rate;
-                                [t_ms, *v]
-                            })
-                            .collect();
-                        plot_ui.line(Line::new("Impulse Response", ir_points));
+                        // Display IR according to start/stop time range
+                        let start_sample = (self.ir_start_ms * self.sample_rate / 1000.0) as usize;
+                        let stop_sample = ((self.ir_stop_ms * self.sample_rate / 1000.0) as usize)
+                            .min(self.ir_data.len());
+
+                        if start_sample < stop_sample {
+                            let ir_points: PlotPoints = self
+                                .ir_data
+                                .iter()
+                                .enumerate()
+                                .skip(start_sample)
+                                .take(stop_sample - start_sample)
+                                .map(|(i, v)| {
+                                    let t_ms = i as f64 * 1000.0 / self.sample_rate;
+                                    [t_ms, *v]
+                                })
+                                .collect();
+                            plot_ui.line(Line::new("Impulse Response", ir_points));
+                        }
                     }
                 });
 
@@ -533,6 +582,13 @@ impl eframe::App for FrdToIrApp {
                 Self::wrap_phase_data(&self.reconstructed_phase_deg)
             } else {
                 self.reconstructed_phase_deg.clone()
+            };
+
+            // Apply delay phase removal if requested
+            let recon_phase_data = if self.remove_delay_phase {
+                Self::remove_linear_phase(&recon_phase_data, self.delay_ms)
+            } else {
+                recon_phase_data
             };
 
             ui.horizontal(|ui| {

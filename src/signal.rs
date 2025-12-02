@@ -1,6 +1,5 @@
 use num_complex::Complex;
 use rustfft::FftPlanner;
-use std::f64::consts::PI;
 
 // Monotone Piecewise Cubic Hermite Interpolator (PCHIP)
 pub struct Pchip {
@@ -137,6 +136,7 @@ impl Pchip {
     }
 
     /// Interpolate with separate extrapolation control for DC and HF
+    /// For HF roll-off mode: uses exponential decay instead of linear to avoid oscillations
     pub fn interpolate_with_extrap_modes(
         &self,
         xq: f64,
@@ -155,7 +155,26 @@ impl Pchip {
 
         if xq >= self.x[n - 1] {
             if use_hf_linear {
-                return self.y[n - 1] + self.d[n - 1] * (xq - self.x[n - 1]);
+                // Exponential decay for smooth roll-off (avoids oscillations)
+                // Uses the last two points to estimate a decay rate
+                let x_last = self.x[n - 1];
+                let y_last = self.y[n - 1];
+                let dx = xq - x_last;
+
+                // Compute decay constant from the derivative at the last point
+                // For a smooth roll-off, we want the magnitude to decay exponentially
+                // If derivative is negative (roll-off), use exponential decay
+                // Otherwise, clamp to zero to avoid growing magnitude
+                if self.d[n - 1] < 0.0 && y_last > 0.0 {
+                    // Exponential decay: y(x) = y_last * exp(lambda * dx)
+                    // where lambda = d[n-1] / y_last (ensures smooth transition)
+                    let lambda = self.d[n - 1] / y_last;
+                    let result = y_last * (lambda * dx).exp();
+                    return result.max(1e-20); // Floor at very small positive value
+                } else {
+                    // If already small or derivative is positive, just return last value
+                    return y_last.max(1e-20);
+                }
             } else {
                 return self.y[n - 1];
             }
@@ -239,6 +258,62 @@ pub fn unwrap_phase_radians(phases: &[f64]) -> Vec<f64> {
     unwrapped
 }
 
+/// Resample a spectrum to reduce the number of points for logarithmic display
+///
+/// Progressive downsampling strategy optimized for logarithmic X-axis:
+/// - Below 500 Hz: Keep all points (critical low frequency region)
+/// - 500 Hz - 1000 Hz: Keep 1 out of 2 points
+/// - 1000 Hz - 2000 Hz: Keep 1 out of 3 points
+/// - 2000 Hz - 5000 Hz: Keep 1 out of 4 points
+/// - 5000 Hz - 10000 Hz: Keep 1 out of 6 points
+/// - 10000 Hz - 15000 Hz: Keep 1 out of 7 points
+/// - Above 15000 Hz: Keep 1 out of 8 points
+pub fn resample_plot_data(spectrum: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if spectrum.is_empty() {
+        return Vec::new();
+    }
+
+    let mut resampled = Vec::with_capacity(spectrum.len() / 4);
+
+    // Track skip counters for each frequency band
+    let mut counter_500 = 0u32;
+    let mut counter_1k = 0u32;
+    let mut counter_2k = 0u32;
+    let mut counter_5k = 0u32;
+    let mut counter_10k = 0u32;
+    let mut counter_15k = 0u32;
+
+    for &(freq, mag) in spectrum.iter() {
+        let should_keep = if freq > 15000.0 {
+            counter_15k += 1;
+            counter_15k % 8 == 0
+        } else if freq > 10000.0 {
+            counter_10k += 1;
+            counter_10k % 7 == 0
+        } else if freq > 5000.0 {
+            counter_5k += 1;
+            counter_5k % 6 == 0
+        } else if freq > 2000.0 {
+            counter_2k += 1;
+            counter_2k % 4 == 0
+        } else if freq > 1000.0 {
+            counter_1k += 1;
+            counter_1k % 3 == 0
+        } else if freq > 500.0 {
+            counter_500 += 1;
+            counter_500 % 2 == 0
+        } else {
+            true
+        };
+
+        if should_keep {
+            resampled.push((freq, mag));
+        }
+    }
+
+    resampled
+}
+
 /// Reconstruct impulse response from FRD data with adjustable delay
 pub fn impulse_from_frd(
     frd: &[(f64, f64, f64)],
@@ -275,12 +350,16 @@ pub fn impulse_from_frd(
 
     let delay_compensation = delay_ms / 1000.0;
 
+    // Store last frequency and magnitude before moving mags_lin
+    let f_last = *freqs.last().unwrap();
+    let mag_last = *mags_lin.last().unwrap();
+
     let mag_interp = Pchip::new_unsorted(freqs.clone(), mags_lin)
         .expect("Failed to create magnitude interpolator");
     let phase_interp = Pchip::new_unsorted(freqs.clone(), phases_rad)
         .expect("Failed to create phase interpolator");
 
-    let fft_size = (fs as usize).next_power_of_two();
+    let fft_size = 4 * (fs as usize).next_power_of_two();
     let half = fft_size / 2;
 
     let mut spectrum: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); fft_size];
@@ -289,13 +368,51 @@ pub fn impulse_from_frd(
     let mut interp_mag_db = Vec::new();
     let mut interp_phase_deg = Vec::new();
 
+    // For HF roll-off: apply exponential decay from last measured frequency
+    let freqs_ref = &freqs; // Keep reference for later use
+
     for k in 0..=half {
         let f_bin = k as f64 * fs / fft_size as f64;
 
-        let mut mag =
-            mag_interp.interpolate_with_extrap_modes(f_bin, dc_extrap_rolloff, hf_extrap_rolloff);
+        let mut mag = if hf_extrap_rolloff && f_bin > f_last {
+            // Apply exponential roll-off beyond last measured frequency
+            let n = freqs_ref.len();
+            if n >= 2 {
+                // Estimate decay rate from last two points
+                let f_prev = freqs_ref[n - 2];
+                let mag_prev_db = mags_db[n - 2];
+                let mag_last_db = mags_db[n - 1];
+
+                // Calculate natural slope in dB/octave
+                let octave_span = (f_last / f_prev).log2();
+                let natural_slope_db_per_oct = if octave_span > 0.0 {
+                    (mag_last_db - mag_prev_db) / octave_span
+                } else {
+                    0.0
+                };
+
+                // Use natural slope if it's negative (roll-off), otherwise force -96 dB/octave
+                let slope_db_per_oct = if natural_slope_db_per_oct < -1.0 {
+                    // Natural roll-off detected, use it but amplify by 2x for stronger decay
+                    natural_slope_db_per_oct * 2.0
+                } else {
+                    // No roll-off or rising, force a -96 dB/octave slope
+                    -96.0
+                };
+
+                let octaves = (f_bin / f_last).log2();
+                let attenuation_db = slope_db_per_oct * octaves;
+                let result = mag_last * 10f64.powf(attenuation_db / 20.0);
+                result.max(1e-20)
+            } else {
+                mag_last.max(1e-20)
+            }
+        } else {
+            mag_interp.interpolate_with_extrap_modes(f_bin, dc_extrap_rolloff, false)
+        };
+
         let phase_interp_raw = phase_interp.interpolate_with_extrapolation(f_bin, false);
-        let mut phase = phase_interp_raw - 2.0 * PI * f_bin * delay_compensation;
+        let mut phase = phase_interp_raw; // - 2.0 * PI * f_bin * delay_compensation;
 
         if !mag.is_finite() || mag < 0.0 {
             mag = 1e-20;
@@ -335,6 +452,10 @@ pub fn impulse_from_frd(
         ir.rotate_right(rotation % ir_len);
     }
 
+    // Resample interpolated data for display (reduce point count)
+    let interp_mag_db = resample_plot_data(&interp_mag_db);
+    let interp_phase_deg = resample_plot_data(&interp_phase_deg);
+
     (ir, interp_mag_db, interp_phase_deg)
 }
 
@@ -373,12 +494,33 @@ pub fn freqz(impulse: &[f64], fs: usize, n: usize) -> Vec<(f64, f64, f64)> {
 
     let unwrapped_phases = unwrap_phase_radians(&phases);
 
-    (0..half_n)
+    let result: Vec<(f64, f64, f64)> = (0..half_n)
         .map(|i| {
             let freq = i as f64 * nyquist / (fft_size as f64 / 2.0);
             let mag_db = 20.0 * magnitudes[i].log10();
             let phase_deg = unwrapped_phases[i].to_degrees();
             (freq, mag_db, phase_deg)
+        })
+        .collect();
+
+    // Resample for display (keep only magnitude/phase pairs for resampling)
+    let mag_pairs: Vec<(f64, f64)> = result.iter().map(|(f, m, _)| (*f, *m)).collect();
+    let phase_pairs: Vec<(f64, f64)> = result.iter().map(|(f, _, p)| (*f, *p)).collect();
+
+    let resampled_mag = resample_plot_data(&mag_pairs);
+    let resampled_phase = resample_plot_data(&phase_pairs);
+
+    // Merge back: use frequencies from resampled_mag and find corresponding phase
+    resampled_mag
+        .into_iter()
+        .map(|(f, m)| {
+            // Find matching phase for this frequency
+            let phase = resampled_phase
+                .iter()
+                .find(|(fp, _)| (*fp - f).abs() < 1e-6)
+                .map(|(_, p)| *p)
+                .unwrap_or(0.0);
+            (f, m, phase)
         })
         .collect()
 }
