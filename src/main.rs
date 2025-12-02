@@ -48,13 +48,8 @@ struct FrdToIrApp {
     ir_start_ms: f64,
     ir_stop_ms: f64,
 
-    // Filter parameters
-    enable_highpass: bool,
-    highpass_freq: f64,
-    highpass_transition: f64, // transition width in Hz
-    enable_lowpass: bool,
-    lowpass_freq: f64,
-    lowpass_transition: f64, // transition width in Hz
+    // Processing options
+    minimum_phase: bool,
 
     // UI state
     wrap_phase: bool,
@@ -79,12 +74,7 @@ impl Default for FrdToIrApp {
             freq_max: 22000.0,
             ir_start_ms: 0.0,
             ir_stop_ms: 100.0,
-            enable_highpass: false,
-            highpass_freq: 20.0,
-            highpass_transition: 10.0,
-            enable_lowpass: false,
-            lowpass_freq: 21000.0,
-            lowpass_transition: 2000.0,
+            minimum_phase: false,
             wrap_phase: false,
             remove_delay_phase: false,
             show_filter_window: false,
@@ -130,25 +120,32 @@ impl FrdToIrApp {
         }
 
         // Convert FRD to IR with current parameters
-        let (ir, interp_mag, interp_phase) = impulse_from_frd(
-            &self.frd_data,
-            self.sample_rate,
-            self.delay_ms,
-            self.enable_highpass,
-            self.highpass_freq,
-            self.highpass_transition,
-            self.enable_lowpass,
-            self.lowpass_freq,
-            self.lowpass_transition,
-        );
+        let (ir, interp_mag, interp_phase) =
+            impulse_from_frd(&self.frd_data, self.sample_rate, self.delay_ms);
 
-        self.ir_data = ir.clone();
+        // Apply minimum phase transformation if requested
+        let ir_final = if self.minimum_phase && !ir.is_empty() {
+            // Apply minimum phase transformation, then restore the delay
+            let ir_min_phase = signal::minimum_phase_transform(&ir);
+
+            // Re-apply the delay by rotating the IR
+            let delay_samples = (self.delay_ms * self.sample_rate / 1000.0) as usize;
+            let mut ir_delayed = ir_min_phase;
+            if delay_samples > 0 && delay_samples < ir_delayed.len() {
+                ir_delayed.rotate_right(delay_samples);
+            }
+            ir_delayed
+        } else {
+            ir
+        };
+
+        self.ir_data = ir_final.clone();
         self.interp_mag_db = interp_mag;
         self.interp_phase_deg = interp_phase;
 
-        // Compute frequency response from full IR (not truncated)
-        if !ir.is_empty() {
-            let freqz_data = freqz(&ir, self.sample_rate as usize, (1 << 17) as usize);
+        // Compute frequency response from IR
+        if !ir_final.is_empty() {
+            let freqz_data = freqz(&ir_final, self.sample_rate as usize, (1 << 17) as usize);
             self.reconstructed_mag_db = freqz_data.iter().map(|(f, m, _)| (*f, *m)).collect();
             self.reconstructed_phase_deg = freqz_data.iter().map(|(f, _, p)| (*f, *p)).collect();
         }
@@ -243,7 +240,7 @@ impl eframe::App for FrdToIrApp {
 
             // Parameters
             ui.horizontal(|ui| {
-                ui.label("Sample Rate:");
+                ui.label("Sample Rate:").on_hover_text("Sampling rate of the generated impulse response.");
                 let mut sr_changed = false;
                 egui::ComboBox::from_id_salt("sample_rate")
                     .selected_text(format!("{} Hz", self.sample_rate as u32))
@@ -266,11 +263,14 @@ impl eframe::App for FrdToIrApp {
                         sr_changed |= ui
                             .selectable_value(&mut self.sample_rate, 192000.0, "192000 Hz")
                             .changed();
+                        sr_changed |= ui
+                            .selectable_value(&mut self.sample_rate, 384000.0, "384000 Hz")
+                            .changed();
                     });
 
                 ui.add_space(20.0);
 
-                ui.label("Delay:");
+                ui.label("Delay:").on_hover_text("Delay applied to the impulse to avoid time-domain aliasing and facilitate processing.");
                 let delay_changed = ui
                     .add(
                         egui::DragValue::new(&mut self.delay_ms)
@@ -284,6 +284,7 @@ impl eframe::App for FrdToIrApp {
 
                 if ui
                     .toggle_value(&mut self.wrap_phase, "Wrap Phase")
+                    .on_hover_text("Wraps phase into the [-180°, 180°] range for simplified visualization.")
                     .changed()
                 {
                     // No need to reconvert, just affects display
@@ -291,18 +292,24 @@ impl eframe::App for FrdToIrApp {
 
                 ui.add_space(20.0);
 
-                if ui.button("Filter Settings...").clicked() {
-                    self.show_filter_window = !self.show_filter_window;
-                }
+                let minimum_phase_changed = ui
+                    .toggle_value(&mut self.minimum_phase, "Minimum Phase")
+                    .on_hover_text(
+                        "Applies a Hilbert transform to make the IR causal.\n\n\
+                        Many FRD files contain acausal anomalies that cause significant pre-ringing.\n\
+                        This option eliminates all pre-ringing but removes maximum-phase behaviors\n\
+                        (which are corrupted by poorly conditioned FRD files anyway)."
+                    )
+                    .changed();
 
-                if sr_changed || delay_changed {
+                if sr_changed || delay_changed || minimum_phase_changed {
                     self.update_conversion();
                 }
             });
 
             // Second row of controls
             ui.horizontal(|ui| {
-                ui.label("IR Start:");
+                ui.label("IR Start:").on_hover_text("Start time for impulse response visualization.");
                 ui.add(
                     egui::DragValue::new(&mut self.ir_start_ms)
                         .speed(0.1)
@@ -312,7 +319,7 @@ impl eframe::App for FrdToIrApp {
 
                 ui.add_space(10.0);
 
-                ui.label("IR Stop:");
+                ui.label("IR Stop:").on_hover_text("Stop time for impulse response visualization.");
                 let max_ir_time_ms = (self.ir_data.len() as f64 * 1000.0) / self.sample_rate;
                 ui.add(
                     egui::DragValue::new(&mut self.ir_stop_ms)
@@ -323,7 +330,7 @@ impl eframe::App for FrdToIrApp {
 
                 ui.add_space(20.0);
 
-                ui.label("Freq Min:");
+                ui.label("Freq Min:").on_hover_text("Minimum frequency for frequency response graph visualization.");
                 ui.add(
                     egui::DragValue::new(&mut self.freq_min)
                         .speed(1.0)
@@ -333,7 +340,7 @@ impl eframe::App for FrdToIrApp {
 
                 ui.add_space(10.0);
 
-                ui.label("Freq Max:");
+                ui.label("Freq Max:").on_hover_text("Maximum frequency for frequency response graph visualization.");
                 ui.add(
                     egui::DragValue::new(&mut self.freq_max)
                         .speed(10.0)
@@ -345,6 +352,7 @@ impl eframe::App for FrdToIrApp {
 
                 if ui
                     .toggle_value(&mut self.remove_delay_phase, "Remove Delay Phase")
+                    .on_hover_text("Removes the linear phase component corresponding to the added delay, to visualize the intrinsic system phase (not applied to exported data).")
                     .changed()
                 {
                     // No need to reconvert, just affects display
@@ -558,15 +566,15 @@ impl eframe::App for FrdToIrApp {
             // Graph 3: Reconstructed Frequency Response (from IR)
             ui.label(egui::RichText::new("Reconstructed Frequency Response (from IR)").strong());
 
-            let recon_phase_data = if self.wrap_phase {
-                Self::wrap_phase_data(&self.reconstructed_phase_deg)
+            // Apply delay phase removal if requested
+            let recon_phase_data = if self.remove_delay_phase {
+                Self::remove_linear_phase(&self.reconstructed_phase_deg, self.delay_ms)
             } else {
                 self.reconstructed_phase_deg.clone()
             };
 
-            // Apply delay phase removal if requested
-            let recon_phase_data = if self.remove_delay_phase {
-                Self::remove_linear_phase(&recon_phase_data, self.delay_ms)
+            let recon_phase_data = if self.wrap_phase {
+                Self::wrap_phase_data(&recon_phase_data)
             } else {
                 recon_phase_data
             };
@@ -624,85 +632,5 @@ impl eframe::App for FrdToIrApp {
                     });
             });
         });
-
-        // Filter settings window
-        let mut show_filter_window = self.show_filter_window;
-        if show_filter_window {
-            egui::Window::new("Filter Settings")
-                .open(&mut show_filter_window)
-                .resizable(true)
-                .default_width(400.0)
-                .show(ctx, |ui| {
-                    ui.heading("Bandpass Filter");
-                    ui.separator();
-
-                    let mut filter_changed = false;
-
-                    // High-pass filter
-                    filter_changed |= ui
-                        .checkbox(&mut self.enable_highpass, "Enable High-Pass Filter")
-                        .changed();
-                    ui.add_enabled_ui(self.enable_highpass, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Cutoff Frequency:");
-                            filter_changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut self.highpass_freq)
-                                        .speed(1.0)
-                                        .range(1.0..=1000.0)
-                                        .suffix(" Hz"),
-                                )
-                                .changed();
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Transition Width:");
-                            filter_changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut self.highpass_transition)
-                                        .speed(1.0)
-                                        .range(1.0..=500.0)
-                                        .suffix(" Hz"),
-                                )
-                                .changed();
-                        });
-                    });
-
-                    ui.add_space(20.0);
-
-                    // Low-pass filter
-                    filter_changed |= ui
-                        .checkbox(&mut self.enable_lowpass, "Enable Low-Pass Filter")
-                        .changed();
-                    ui.add_enabled_ui(self.enable_lowpass, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Cutoff Frequency:");
-                            filter_changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut self.lowpass_freq)
-                                        .speed(10.0)
-                                        .range(1000.0..=48000.0)
-                                        .suffix(" Hz"),
-                                )
-                                .changed();
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Transition Width:");
-                            filter_changed |= ui
-                                .add(
-                                    egui::DragValue::new(&mut self.lowpass_transition)
-                                        .speed(10.0)
-                                        .range(10.0..=5000.0)
-                                        .suffix(" Hz"),
-                                )
-                                .changed();
-                        });
-                    });
-
-                    if filter_changed {
-                        self.update_conversion();
-                    }
-                });
-        }
-        self.show_filter_window = show_filter_window;
     }
 }

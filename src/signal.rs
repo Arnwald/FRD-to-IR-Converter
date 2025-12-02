@@ -314,61 +314,11 @@ pub fn resample_plot_data(spectrum: &[(f64, f64)]) -> Vec<(f64, f64)> {
     resampled
 }
 
-/// Compute bandpass filter window at a given frequency
-/// Uses raised cosine (Hann) transitions for smooth roll-off
-fn compute_filter_window(
-    freq: f64,
-    enable_highpass: bool,
-    highpass_freq: f64,
-    highpass_transition: f64,
-    enable_lowpass: bool,
-    lowpass_freq: f64,
-    lowpass_transition: f64,
-) -> f64 {
-    let mut window = 1.0;
-
-    // High-pass filter (raised cosine transition)
-    if enable_highpass {
-        let hp_start = (highpass_freq - highpass_transition / 2.0).max(0.0);
-        let hp_end = highpass_freq + highpass_transition / 2.0;
-
-        if freq < hp_start {
-            window = 0.0;
-        } else if freq < hp_end {
-            // Raised cosine from 0 to 1
-            let t = (freq - hp_start) / highpass_transition;
-            window *= 0.5 * (1.0 - (std::f64::consts::PI * t).cos());
-        }
-    }
-
-    // Low-pass filter (raised cosine transition)
-    if enable_lowpass {
-        let lp_start = (lowpass_freq - lowpass_transition / 2.0).max(0.0);
-        let lp_end = lowpass_freq + lowpass_transition / 2.0;
-
-        if freq > lp_end {
-            window = 0.0;
-        } else if freq > lp_start {
-            // Raised cosine from 1 to 0
-            let t = (freq - lp_start) / lowpass_transition;
-            window *= 0.5 * (1.0 + (std::f64::consts::PI * t).cos());
-        }
-    }
-
-    window
-}
-
-/// Reconstruct impulse response from FRD data with adjustable delay and filtering
+/// Reconstruct impulse response from FRD data with adjustable delay
 pub fn impulse_from_frd(
     frd: &[(f64, f64, f64)],
     fs: f64,
     delay_ms: f64,
-    enable_highpass: bool,
-    highpass_freq: f64,
-    highpass_transition: f64,
-    enable_lowpass: bool,
-    lowpass_freq: f64,
-    lowpass_transition: f64,
 ) -> (Vec<f64>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
     let nyq = fs / 2.0;
 
@@ -419,18 +369,6 @@ pub fn impulse_from_frd(
         let mut mag = mag_interp.interpolate_with_extrap_modes(f_bin, false, false);
         let phase_interp_raw = phase_interp.interpolate_with_extrapolation(f_bin, false);
         let mut phase = phase_interp_raw;
-
-        // Apply bandpass filter window
-        let filter_window = compute_filter_window(
-            f_bin,
-            enable_highpass,
-            highpass_freq,
-            highpass_transition,
-            enable_lowpass,
-            lowpass_freq,
-            lowpass_transition,
-        );
-        mag *= filter_window;
 
         if !mag.is_finite() || mag < 0.0 {
             mag = 1e-20;
@@ -540,5 +478,79 @@ pub fn freqz(impulse: &[f64], fs: usize, n: usize) -> Vec<(f64, f64, f64)> {
                 .unwrap_or(0.0);
             (f, m, phase)
         })
+        .collect()
+}
+
+/// Convert an impulse response to minimum phase using the Hilbert transform method
+/// This computes the minimum phase equivalent that has the same magnitude response
+pub fn minimum_phase_transform(impulse: &[f64]) -> Vec<f64> {
+    let n = impulse.len();
+    let fft_size = n.next_power_of_two() * 2; // Use 2x for better precision
+
+    // Zero-pad to power of 2
+    let mut padded: Vec<Complex<f64>> = impulse
+        .iter()
+        .map(|&x| Complex::new(x, 0.0))
+        .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
+        .take(fft_size)
+        .collect();
+
+    // Forward FFT to get frequency domain
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(fft_size);
+    fft.process(&mut padded);
+
+    // Compute log magnitude spectrum (real only, no imaginary part yet)
+    let mut log_mag: Vec<Complex<f64>> = padded
+        .iter()
+        .map(|c| {
+            let mag = c.norm().max(1e-20);
+            Complex::new(mag.ln(), 0.0)
+        })
+        .collect();
+
+    // Apply inverse FFT to get real cepstrum
+    let ifft = planner.plan_fft_inverse(fft_size);
+    ifft.process(&mut log_mag);
+
+    // Scale by FFT size
+    for c in log_mag.iter_mut() {
+        *c = *c / fft_size as f64;
+    }
+
+    // Apply Hilbert transform window in cepstral domain
+    // Keep DC, double positive quefrencies, zero negative quefrencies
+    // This creates the minimum phase cepstrum
+    log_mag[0] = log_mag[0]; // DC: keep as is
+
+    for i in 1..fft_size / 2 {
+        log_mag[i] = log_mag[i] * 2.0; // Double positive quefrencies
+    }
+
+    if fft_size % 2 == 0 {
+        log_mag[fft_size / 2] = log_mag[fft_size / 2]; // Nyquist: keep as is
+    }
+
+    for i in (fft_size / 2 + 1)..fft_size {
+        log_mag[i] = Complex::new(0.0, 0.0); // Zero negative quefrencies
+    }
+
+    // Forward FFT to get complex log spectrum (log magnitude + j*minimum phase)
+    let fft2 = planner.plan_fft_forward(fft_size);
+    fft2.process(&mut log_mag);
+
+    // Convert from complex log spectrum to linear spectrum
+    // exp(log|H| + j*phi) = |H| * exp(j*phi)
+    let mut min_phase_spectrum: Vec<Complex<f64>> = log_mag.iter().map(|c| c.exp()).collect();
+
+    // Inverse FFT to get minimum phase impulse response
+    let ifft2 = planner.plan_fft_inverse(fft_size);
+    ifft2.process(&mut min_phase_spectrum);
+
+    // Extract real part and normalize
+    min_phase_spectrum
+        .iter()
+        .take(n)
+        .map(|c| c.re / fft_size as f64)
         .collect()
 }
