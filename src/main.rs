@@ -59,12 +59,16 @@ struct FrdToIrApp {
 
     // Processing options
     minimum_phase: bool,
+    normalize_on_export: bool,
 
     // UI state
     wrap_phase: bool,
     remove_delay_phase: bool,
     show_filter_window: bool,
     show_data_info_window: bool,
+    show_export_dialog: bool,
+    show_normalization_popup: bool,
+    normalization_factor: f64,
     file_path: String,
     #[serde(skip)]
     file_name: String,
@@ -93,10 +97,14 @@ impl Default for FrdToIrApp {
             ir_start_ms: 0.0,
             ir_stop_ms: 100.0,
             minimum_phase: false,
+            normalize_on_export: false,
             wrap_phase: false,
             remove_delay_phase: false,
             show_filter_window: false,
             show_data_info_window: false,
+            show_export_dialog: false,
+            show_normalization_popup: false,
+            normalization_factor: 1.0,
             file_path: String::new(),
             file_name: String::new(),
         }
@@ -283,6 +291,51 @@ impl FrdToIrApp {
             })
             .collect()
     }
+
+    fn export_wav(&mut self) {
+        if self.ir_data.is_empty() {
+            return;
+        }
+
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("WAV Files", &["wav", "WAV"])
+            .set_file_name("impulse_response.wav")
+            .save_file()
+        {
+            // Get peak level
+            let max_val = self.ir_data.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+            
+            // Apply normalization if user requested it
+            let (ir_to_export, was_normalized): (Vec<f32>, bool) = if self.normalize_on_export && max_val > 0.0 {
+                let normalized = self.ir_data.iter().map(|&x| (x / max_val) as f32).collect();
+                (normalized, true)
+            } else {
+                let as_f32 = self.ir_data.iter().map(|&x| x as f32).collect();
+                (as_f32, false)
+            };
+
+            // Write WAV file
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: self.sample_rate as u32,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+
+            if let Ok(mut writer) = hound::WavWriter::create(&path, spec) {
+                for &sample in &ir_to_export {
+                    let _ = writer.write_sample(sample);
+                }
+                let _ = writer.finalize();
+                
+                // Show popup if normalization was applied
+                if was_normalized {
+                    self.normalization_factor = max_val;
+                    self.show_normalization_popup = true;
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for FrdToIrApp {
@@ -300,6 +353,16 @@ impl eframe::App for FrdToIrApp {
                         self.import_frd();
                         ui.close();
                     }
+                    
+                    if ui.button("Export WAV...").on_hover_text(
+                        "Export impulse response to WAV file (32-bit float).\n\n\
+                        The exported file can contain values > 1.0 without issue.\n\
+                        You can choose to normalize to 1.0 if needed for compatibility."
+                    ).clicked() {
+                        self.show_export_dialog = true;
+                        ui.close();
+                    }
+                    
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -938,6 +1001,131 @@ impl eframe::App for FrdToIrApp {
                         • Linear frequency spacing if possible"
                     );
                 });
+        }
+        
+        // Export dialog
+        if self.show_export_dialog {
+            let mut close_dialog = false;
+            let mut do_export = false;
+            
+            egui::Window::new("Export WAV")
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Export Options");
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    // Show peak level info
+                    if !self.ir_data.is_empty() {
+                        let max_val = self.ir_data.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+                        ui.label(format!("Current peak level: {:.6} ({:.2} dB)", max_val, 20.0 * max_val.log10()));
+                        
+                        if max_val > 1.0 {
+                            ui.colored_label(
+                                if ui.ctx().style().visuals.dark_mode {
+                                    egui::Color32::YELLOW
+                                } else {
+                                    egui::Color32::from_rgb(180, 120, 0)
+                                },
+                                format!("Peak exceeds 1.0 by {:.2} dB", 20.0 * max_val.log10())
+                            );
+                        } else {
+                            ui.colored_label(
+                                if ui.ctx().style().visuals.dark_mode {
+                                    egui::Color32::GREEN
+                                } else {
+                                    egui::Color32::from_rgb(0, 120, 0)
+                                },
+                                "Peak is within [0.0, 1.0] range"
+                            );
+                        }
+                    }
+                    
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    // Normalization option
+                    ui.checkbox(&mut self.normalize_on_export, "Normalize to 1.0")
+                        .on_hover_text(
+                            "Divide all samples by the peak value to ensure the maximum\n\
+                            absolute value is 1.0. This improves compatibility with some software\n\
+                            but reduces headroom.\n\n\
+                            Note: 32-bit float WAV files can safely store values > 1.0,\n\
+                            so normalization is usually not necessary for modern DAWs."
+                        );
+                    
+                    ui.add_space(15.0);
+                    ui.separator();
+                    
+                    // Buttons
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            close_dialog = true;
+                        }
+                        
+                        ui.add_space(10.0);
+                        
+                        if ui.button("Export").clicked() {
+                            do_export = true;
+                            close_dialog = true;
+                        }
+                    });
+                });
+            
+            if close_dialog {
+                self.show_export_dialog = false;
+            }
+            
+            if do_export {
+                self.export_wav();
+            }
+        }
+        
+        // Normalization popup
+        if self.show_normalization_popup {
+            let mut close_popup = false;
+            egui::Window::new("Normalization Applied")
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("WAV Export - Normalization Applied");
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    ui.label(
+                        format!(
+                            "The impulse response peak level ({:.2} dB / {:.6} linear) exceeded 1.0,\n\
+                            so the signal was normalized to prevent clipping in the WAV file.",
+                            20.0 * self.normalization_factor.log10(),
+                            self.normalization_factor
+                        )
+                    );
+                    ui.add_space(10.0);
+                    
+                    ui.label(
+                        format!("Normalization factor applied: {:.6} (divided by {:.6})",
+                            1.0 / self.normalization_factor,
+                            self.normalization_factor
+                        )
+                    );
+                    ui.add_space(10.0);
+                    
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.add_space(ui.available_width() / 2.0 - 30.0);
+                        if ui.button("OK").clicked() {
+                            close_popup = true;
+                        }
+                    });
+                });
+            
+            if close_popup {
+                self.show_normalization_popup = false;
+            }
         }
     }
 }

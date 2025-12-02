@@ -13,6 +13,7 @@ num-complex = "0.4"
 interp1d = "0.2"
 rfd = "0.16"
 serde = { version = "1", features = ["derive"] }
+hound = "3.5"
 
 [[bin]]
 name = "frd-to-ir"
