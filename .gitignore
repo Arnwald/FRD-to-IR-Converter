@@ -5,6 +5,8 @@ Info.plist
 # trunk output folder
 dist
 
+/linfir
+
 # Rust compile target directories:
 target
 target_ra

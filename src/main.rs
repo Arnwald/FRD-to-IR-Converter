@@ -343,36 +343,47 @@ impl eframe::App for FrdToIrApp {
             // Reserve space for separators (2 × ~20px) and margins
             let graph_height = (available_height - 100.0) / 3.0;
 
-            // Helper functions for log axis
+            // Helper functions for log axis (data is already in log10(Hz))
+            // Based on linfir's implementation
             let log_spacer = |input: egui_plot::GridInput| -> Vec<egui_plot::GridMark> {
                 let (min, max) = input.bounds;
-                let mut marks = Vec::new();
-                let min_pow = min.log10().floor() as i32;
-                let max_pow = max.log10().ceil() as i32;
-
-                for pow in min_pow..=max_pow {
-                    let base = 10f64.powi(pow);
-                    // Place marks at 1, 2, and 5 of each decade
-                    for m in [1.0, 2.0, 5.0] {
-                        let value = base * m;
-                        if value >= min && value <= max {
-                            marks.push(egui_plot::GridMark {
-                                value,
-                                step_size: base,
-                            });
-                        }
-                    }
+                let mut marks = vec![];
+                for i in min.floor() as i32..=max.ceil() as i32 {
+                    marks.extend(
+                        (10..100)
+                            .map(|j| {
+                                let value = i as f64 + (j as f64).log10() - 1.0;
+                                let step_size = if j == 10 {
+                                    1.0
+                                } else if j % 10 == 0 {
+                                    0.1
+                                } else {
+                                    0.01
+                                };
+                                egui_plot::GridMark { value, step_size }
+                            })
+                            .filter(|gm| (min..=max).contains(&gm.value)),
+                    );
                 }
                 marks
             };
 
             let log_formatter =
                 |mark: egui_plot::GridMark, _range: &std::ops::RangeInclusive<f64>| -> String {
-                    let freq = mark.value;
-                    if freq >= 1000.0 {
-                        format!("{:.0}k", freq / 1000.0)
-                    } else {
-                        format!("{:.0}", freq)
+                    let x = 10.0_f64.powf(mark.value).round();
+                    match x {
+                        x if x == 10.0 => "10".to_string(),
+                        x if x == 20.0 => "20".to_string(),
+                        x if x == 50.0 => "50".to_string(),
+                        x if x == 100.0 => "100".to_string(),
+                        x if x == 200.0 => "200".to_string(),
+                        x if x == 500.0 => "500".to_string(),
+                        x if x == 1_000.0 => "1k".to_string(),
+                        x if x == 2_000.0 => "2k".to_string(),
+                        x if x == 5_000.0 => "5k".to_string(),
+                        x if x == 10_000.0 => "10k".to_string(),
+                        x if x == 20_000.0 => "20k".to_string(),
+                        _ => "".to_string(), // Hide other ticks
                     }
                 };
 

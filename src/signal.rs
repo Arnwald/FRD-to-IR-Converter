@@ -252,7 +252,7 @@ pub fn impulse_from_frd(
     let mut data: Vec<(f64, f64, f64)> = frd
         .iter()
         .cloned()
-        .filter(|(f, _, _)| *f > 0.0 && *f <= nyq && f.is_finite())
+        .filter(|(f, _, _)| *f <= nyq && f.is_finite())
         .collect();
 
     if data.len() < 2 {
