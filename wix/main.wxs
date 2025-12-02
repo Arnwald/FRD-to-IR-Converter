@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*" 
+             Name="FRD to IR Converter" 
+             Language="1033" 
+             Version="0.1.0" 
+             Manufacturer="DEM Audio" 
+             UpgradeCode="02E8746A-3F54-4CDD-A87B-E10A62FFA388">
+        
+        <Package InstallerVersion="200" 
+                 Compressed="yes" 
+                 InstallScope="perMachine" 
+                 Description="Convert FRD frequency response data to impulse response" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Feature Id="ProductFeature" Title="FRD to IR Converter" Level="1">
+            <ComponentGroupRef Id="ProductComponents" />
+            <ComponentRef Id="ApplicationShortcut" />
+        </Feature>
+
+        <!-- Application Icon -->
+        <Icon Id="ProductIcon" SourceFile="icons\icon.ico" />
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+        
+        <!-- Add/Remove Programs properties -->
+        <Property Id="ARPHELPLINK" Value="https://github.com/Arnwald/linfir" />
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/Arnwald/linfir" />
+    </Product>
+
+    <Fragment>
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFilesFolder">
+                <Directory Id="INSTALLFOLDER" Name="FRD to IR Converter" />
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="FRD to IR Converter"/>
+            </Directory>
+        </Directory>
+    </Fragment>
+
+    <Fragment>
+        <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+            <Component Id="MainExecutable" Guid="09DE4A79-57E9-43E5-BD1F-5B97446A7F94">
+                <File Id="MainExe" 
+                      Source="target\release\frd-to-ir.exe" 
+                      KeyPath="yes" 
+                      Checksum="yes" />
+            </Component>
+        </ComponentGroup>
+    </Fragment>
+
+    <Fragment>
+        <DirectoryRef Id="ApplicationProgramsFolder">
+            <Component Id="ApplicationShortcut" Guid="94584132-5837-4258-96C3-6907040F6956">
+                <Shortcut Id="ApplicationStartMenuShortcut"
+                          Name="FRD to IR Converter"
+                          Description="Convert FRD frequency response data to impulse response"
+                          Target="[#MainExe]"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="ProductIcon" />
+                <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall"/>
+                <RegistryValue Root="HKCU" 
+                              Key="Software\DEMAudio\FRDtoIRConverter" 
+                              Name="installed" 
+                              Type="integer" 
+                              Value="1" 
+                              KeyPath="yes"/>
+            </Component>
+        </DirectoryRef>
+    </Fragment>
+</Wix>

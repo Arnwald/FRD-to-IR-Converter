@@ -1,0 +1,135 @@
+# cargo-packager configuration for FRD to IR Converter
+# Based on LinFIR's packaging setup
+
+[package]
+name = "frd-to-ir-converter"
+product_name = "FRD to IR Converter"
+version = "0.1.0"
+authors = ["Arnaud Demion <arnaud.demion@demaudio.com>"]
+license = "MIT"
+copyright = "Copyright (c) 2025 DEM Audio. All rights reserved."
+homepage = "https://github.com/Arnwald/frd-to-ir"
+description = "Convert FRD frequency response data to impulse response"
+long_description = """
+FRD to IR Converter is a professional tool for audio engineers and loudspeaker designers.
+It converts frequency response data (FRD format) into impulse responses (IR) for use in
+convolution engines and digital signal processing applications.
+"""
+
+# Identifier must use reverse domain notation
+identifier = "com.demaudio.frd-to-ir-converter"
+
+# Categories for app stores and system menus
+category = "AudioVideo"
+
+[package.metadata]
+# Additional metadata for packaging
+publisher = "DEM Audio"
+
+# Binary configuration
+[[package.binaries]]
+path = "frd-to-ir-converter"
+main = true
+
+# Resources to include in package
+[[package.resources]]
+src = "README.md"
+target = "."
+
+[[package.resources]]
+src = "LICENSE"
+target = "."
+
+[[package.resources]]
+src = "icon.svg"
+target = "icons/"
+
+[[package.resources]]
+src = "icons/icon.ico"
+target = "icons/"
+
+# macOS-specific configuration
+[package.macos]
+frameworks = []
+# Exception entitlements if needed
+exception_domain = []
+minimum_system_version = "10.13"
+
+# Bundle identifier for macOS
+[package.macos.info_plist]
+CFBundleName = "FRD to IR Converter"
+CFBundleDisplayName = "FRD to IR Converter"
+CFBundleIdentifier = "com.demaudio.frd-to-ir-converter"
+CFBundleVersion = "0.1.0"
+CFBundlePackageType = "APPL"
+CFBundleSignature = "????"
+NSHumanReadableCopyright = "Copyright © 2025 DEM Audio"
+NSHighResolutionCapable = true
+
+# Windows-specific configuration
+[package.windows]
+# Use WiX and NSIS for installers
+wix = true
+nsis = true
+
+# Allow elevation for installation
+allow_elevation = true
+
+# Timestamp server for code signing
+timestamp_url = "http://timestamp.digicert.com"
+
+# Windows manifest
+[package.windows.app_manifest]
+requested_execution_level = "asInvoker"
+
+# WiX-specific settings
+[package.windows.wix]
+# WiX upgrade code (must be stable across versions)
+upgrade_code = "02E8746A-3F54-4CDD-A87B-E10A62FFA388"
+
+# License file for installer
+license = "LICENSE"
+
+# Enable Windows features
+enable_elevated_update_task = false
+banner_path = "icons/icon.ico"
+dialog_image_path = "icons/icon.ico"
+
+# Install location
+install_location = "ProgramFiles"
+
+# Language
+language = "en-US"
+
+# NSIS-specific settings
+[package.windows.nsis]
+license = "LICENSE"
+header_image = "icons/icon.ico"
+sidebar_image = "icons/icon.ico"
+install_mode = "currentUser"
+languages = ["English"]
+display_language_selector = false
+
+# Debian/Ubuntu package configuration
+[package.deb]
+depends = ["libgtk-3-0", "libwebkit2gtk-4.0-37"]
+section = "sound"
+priority = "optional"
+changelog = "CHANGELOG.md"
+
+# Desktop entry for Linux
+desktop_template = """
+[Desktop Entry]
+Type=Application
+Name=FRD to IR Converter
+Comment=Convert FRD frequency response to impulse response
+Exec={bin}
+Icon={icon}
+Terminal=false
+Categories=AudioVideo;Audio;
+"""
+
+# AppImage configuration
+[package.appimage]
+# AppImage-specific settings
+bins = ["frd-to-ir-converter"]

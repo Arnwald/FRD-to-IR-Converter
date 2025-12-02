@@ -1,0 +1,46 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background gradient -->
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2563eb;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e40af;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="arrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#60a5fa;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3b82f6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Rounded rectangle background -->
+  <rect width="512" height="512" rx="80" fill="url(#bgGradient)"/>
+  
+  <!-- FRD text -->
+  <text x="256" y="180" 
+        font-family="Arial, Helvetica, sans-serif" 
+        font-size="110" 
+        font-weight="bold" 
+        fill="white" 
+        text-anchor="middle">FRD</text>
+  
+  <!-- Arrow -->
+  <g transform="translate(256, 256)">
+    <path d="M -60 0 L 30 0 L 30 -25 L 70 0 L 30 25 L 30 0" 
+          fill="url(#arrowGradient)" 
+          stroke="white" 
+          stroke-width="4"/>
+  </g>
+  
+  <!-- IR text -->
+  <text x="256" y="380" 
+        font-family="Arial, Helvetica, sans-serif" 
+        font-size="110" 
+        font-weight="bold" 
+        fill="white" 
+        text-anchor="middle">IR</text>
+  
+  <!-- Small waveform decoration at bottom -->
+  <path d="M 100 450 Q 150 435 200 450 T 300 450 T 400 450" 
+        stroke="rgba(255,255,255,0.3)" 
+        stroke-width="3" 
+        fill="none"/>
+</svg>
