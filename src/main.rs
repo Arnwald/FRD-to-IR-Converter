@@ -1,6 +1,3 @@
-#![warn(clippy::all, rust_2018_idioms)]
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
-
 mod signal;
 
 use eframe::egui;
@@ -689,7 +686,7 @@ impl eframe::App for FrdToIrApp {
                     })
                     .show(ui, |plot_ui| {
                         // Magnitude - Original data (filtered)
-                        let frd_mag_points: PlotPoints<'_> = self
+                        let frd_mag_points: PlotPoints = self
                             .frd_data
                             .iter()
                             .filter(|(f, _, _)| *f >= self.freq_min && *f <= self.freq_max)
@@ -699,7 +696,7 @@ impl eframe::App for FrdToIrApp {
 
                         // Magnitude - Interpolated data (filtered)
                         if !self.interp_mag_db.is_empty() {
-                            let interp_mag_points: PlotPoints<'_> = self
+                            let interp_mag_points: PlotPoints = self
                                 .interp_mag_db
                                 .iter()
                                 .filter(|(f, _)| *f >= self.freq_min && *f <= self.freq_max)
@@ -727,7 +724,7 @@ impl eframe::App for FrdToIrApp {
                     })
                     .show(ui, |plot_ui| {
                         // Phase - Original data (filtered)
-                        let frd_phase_points: PlotPoints<'_> = phase_data_raw
+                        let frd_phase_points: PlotPoints = phase_data_raw
                             .iter()
                             .filter(|(f, _)| *f >= self.freq_min && *f <= self.freq_max)
                             .map(|(f, p)| [f.log10(), *p])
@@ -736,7 +733,7 @@ impl eframe::App for FrdToIrApp {
 
                         // Phase - Interpolated with delay (filtered)
                         if !interp_phase_data.is_empty() {
-                            let interp_phase_points: PlotPoints<'_> = interp_phase_data
+                            let interp_phase_points: PlotPoints = interp_phase_data
                                 .iter()
                                 .filter(|(f, _)| *f >= self.freq_min && *f <= self.freq_max)
                                 .map(|(f, p)| [f.log10(), *p])
@@ -770,7 +767,7 @@ impl eframe::App for FrdToIrApp {
                             .min(self.ir_data.len());
 
                         if start_sample < stop_sample {
-                            let ir_points: PlotPoints<'_> = self
+                            let ir_points: PlotPoints = self
                                 .ir_data
                                 .iter()
                                 .enumerate()
@@ -819,7 +816,7 @@ impl eframe::App for FrdToIrApp {
                     })
                     .show(ui, |plot_ui| {
                         if !self.reconstructed_mag_db.is_empty() {
-                            let recon_mag_points: PlotPoints<'_> = self
+                            let recon_mag_points: PlotPoints = self
                                 .reconstructed_mag_db
                                 .iter()
                                 .filter(|(f, _)| {
@@ -845,7 +842,7 @@ impl eframe::App for FrdToIrApp {
                     })
                     .show(ui, |plot_ui| {
                         if !recon_phase_data.is_empty() {
-                            let recon_phase_points: PlotPoints<'_> = recon_phase_data
+                            let recon_phase_points: PlotPoints = recon_phase_data
                                 .iter()
                                 .filter(|(f, _)| {
                                     *f > 0.0 && *f >= self.freq_min && *f <= self.freq_max

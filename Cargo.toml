@@ -2,10 +2,6 @@
 name = "frd-to-ir-converter"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
-authors = ["Arnaud Demion <arnaud@demaudio.ch>"]
-description = "Convert FRD frequency response data to impulse response"
-repository = "https://github.com/Arnwald/linfir"
 
 [dependencies]
 eframe = { version = "0.33.2", features = ["persistence"] }
@@ -18,9 +14,6 @@ interp1d = "0.2"
 rfd = "0.16"
 serde = { version = "1", features = ["derive"] }
 hound = "3.5"
-
-[build-dependencies]
-winres = "0.1"
 
 [[bin]]
 name = "frd-to-ir"
