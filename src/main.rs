@@ -48,13 +48,18 @@ struct FrdToIrApp {
     ir_start_ms: f64,
     ir_stop_ms: f64,
 
-    // Extrapolation modes
-    dc_extrap_rolloff: bool, // true = roll-off, false = constant
-    hf_extrap_rolloff: bool, // true = roll-off, false = constant
+    // Filter parameters
+    enable_highpass: bool,
+    highpass_freq: f64,
+    highpass_transition: f64, // transition width in Hz
+    enable_lowpass: bool,
+    lowpass_freq: f64,
+    lowpass_transition: f64, // transition width in Hz
 
     // UI state
     wrap_phase: bool,
     remove_delay_phase: bool,
+    show_filter_window: bool,
     #[serde(skip)]
     file_name: String,
 }
@@ -74,10 +79,15 @@ impl Default for FrdToIrApp {
             freq_max: 22000.0,
             ir_start_ms: 0.0,
             ir_stop_ms: 100.0,
-            dc_extrap_rolloff: true,
-            hf_extrap_rolloff: false,
+            enable_highpass: false,
+            highpass_freq: 20.0,
+            highpass_transition: 10.0,
+            enable_lowpass: false,
+            lowpass_freq: 21000.0,
+            lowpass_transition: 2000.0,
             wrap_phase: false,
             remove_delay_phase: false,
+            show_filter_window: false,
             file_name: String::new(),
         }
     }
@@ -124,8 +134,12 @@ impl FrdToIrApp {
             &self.frd_data,
             self.sample_rate,
             self.delay_ms,
-            self.dc_extrap_rolloff,
-            self.hf_extrap_rolloff,
+            self.enable_highpass,
+            self.highpass_freq,
+            self.highpass_transition,
+            self.enable_lowpass,
+            self.lowpass_freq,
+            self.lowpass_transition,
         );
 
         self.ir_data = ir.clone();
@@ -277,44 +291,17 @@ impl eframe::App for FrdToIrApp {
 
                 ui.add_space(20.0);
 
-                ui.label("DC Extrap:");
-                let dc_changed = egui::ComboBox::from_id_salt("dc_extrap")
-                    .selected_text(if self.dc_extrap_rolloff {
-                        "Roll-off"
-                    } else {
-                        "Constant"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.dc_extrap_rolloff, false, "Constant")
-                            .clicked()
-                            || ui
-                                .selectable_value(&mut self.dc_extrap_rolloff, true, "Roll-off")
-                                .clicked()
-                    })
-                    .inner
-                    .unwrap_or(false);
+                if ui.button("Filter Settings...").clicked() {
+                    self.show_filter_window = !self.show_filter_window;
+                }
 
-                ui.add_space(10.0);
+                if sr_changed || delay_changed {
+                    self.update_conversion();
+                }
+            });
 
-                ui.label("HF Extrap:");
-                let hf_changed = egui::ComboBox::from_id_salt("hf_extrap")
-                    .selected_text(if self.hf_extrap_rolloff {
-                        "Roll-off"
-                    } else {
-                        "Constant"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.hf_extrap_rolloff, false, "Constant")
-                            .clicked()
-                            || ui
-                                .selectable_value(&mut self.hf_extrap_rolloff, true, "Roll-off")
-                                .clicked()
-                    })
-                    .inner
-                    .unwrap_or(false);
-
-                ui.add_space(20.0);
-
+            // Second row of controls
+            ui.horizontal(|ui| {
                 ui.label("IR Start:");
                 ui.add(
                     egui::DragValue::new(&mut self.ir_start_ms)
@@ -337,8 +324,6 @@ impl eframe::App for FrdToIrApp {
                 ui.add_space(20.0);
 
                 ui.label("Freq Min:");
-
-                ui.label("Freq Min:");
                 ui.add(
                     egui::DragValue::new(&mut self.freq_min)
                         .speed(1.0)
@@ -356,13 +341,8 @@ impl eframe::App for FrdToIrApp {
                         .suffix(" Hz"),
                 );
 
-                if sr_changed || delay_changed || dc_changed || hf_changed {
-                    self.update_conversion();
-                }
-            });
+                ui.add_space(20.0);
 
-            // Second row of controls
-            ui.horizontal(|ui| {
                 if ui
                     .toggle_value(&mut self.remove_delay_phase, "Remove Delay Phase")
                     .changed()
@@ -644,5 +624,85 @@ impl eframe::App for FrdToIrApp {
                     });
             });
         });
+
+        // Filter settings window
+        let mut show_filter_window = self.show_filter_window;
+        if show_filter_window {
+            egui::Window::new("Filter Settings")
+                .open(&mut show_filter_window)
+                .resizable(true)
+                .default_width(400.0)
+                .show(ctx, |ui| {
+                    ui.heading("Bandpass Filter");
+                    ui.separator();
+
+                    let mut filter_changed = false;
+
+                    // High-pass filter
+                    filter_changed |= ui
+                        .checkbox(&mut self.enable_highpass, "Enable High-Pass Filter")
+                        .changed();
+                    ui.add_enabled_ui(self.enable_highpass, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Cutoff Frequency:");
+                            filter_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut self.highpass_freq)
+                                        .speed(1.0)
+                                        .range(1.0..=1000.0)
+                                        .suffix(" Hz"),
+                                )
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Transition Width:");
+                            filter_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut self.highpass_transition)
+                                        .speed(1.0)
+                                        .range(1.0..=500.0)
+                                        .suffix(" Hz"),
+                                )
+                                .changed();
+                        });
+                    });
+
+                    ui.add_space(20.0);
+
+                    // Low-pass filter
+                    filter_changed |= ui
+                        .checkbox(&mut self.enable_lowpass, "Enable Low-Pass Filter")
+                        .changed();
+                    ui.add_enabled_ui(self.enable_lowpass, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Cutoff Frequency:");
+                            filter_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut self.lowpass_freq)
+                                        .speed(10.0)
+                                        .range(1000.0..=48000.0)
+                                        .suffix(" Hz"),
+                                )
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Transition Width:");
+                            filter_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut self.lowpass_transition)
+                                        .speed(10.0)
+                                        .range(10.0..=5000.0)
+                                        .suffix(" Hz"),
+                                )
+                                .changed();
+                        });
+                    });
+
+                    if filter_changed {
+                        self.update_conversion();
+                    }
+                });
+        }
+        self.show_filter_window = show_filter_window;
     }
 }

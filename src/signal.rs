@@ -314,13 +314,61 @@ pub fn resample_plot_data(spectrum: &[(f64, f64)]) -> Vec<(f64, f64)> {
     resampled
 }
 
-/// Reconstruct impulse response from FRD data with adjustable delay
+/// Compute bandpass filter window at a given frequency
+/// Uses raised cosine (Hann) transitions for smooth roll-off
+fn compute_filter_window(
+    freq: f64,
+    enable_highpass: bool,
+    highpass_freq: f64,
+    highpass_transition: f64,
+    enable_lowpass: bool,
+    lowpass_freq: f64,
+    lowpass_transition: f64,
+) -> f64 {
+    let mut window = 1.0;
+
+    // High-pass filter (raised cosine transition)
+    if enable_highpass {
+        let hp_start = (highpass_freq - highpass_transition / 2.0).max(0.0);
+        let hp_end = highpass_freq + highpass_transition / 2.0;
+
+        if freq < hp_start {
+            window = 0.0;
+        } else if freq < hp_end {
+            // Raised cosine from 0 to 1
+            let t = (freq - hp_start) / highpass_transition;
+            window *= 0.5 * (1.0 - (std::f64::consts::PI * t).cos());
+        }
+    }
+
+    // Low-pass filter (raised cosine transition)
+    if enable_lowpass {
+        let lp_start = (lowpass_freq - lowpass_transition / 2.0).max(0.0);
+        let lp_end = lowpass_freq + lowpass_transition / 2.0;
+
+        if freq > lp_end {
+            window = 0.0;
+        } else if freq > lp_start {
+            // Raised cosine from 1 to 0
+            let t = (freq - lp_start) / lowpass_transition;
+            window *= 0.5 * (1.0 + (std::f64::consts::PI * t).cos());
+        }
+    }
+
+    window
+}
+
+/// Reconstruct impulse response from FRD data with adjustable delay and filtering
 pub fn impulse_from_frd(
     frd: &[(f64, f64, f64)],
     fs: f64,
     delay_ms: f64,
-    dc_extrap_rolloff: bool,
-    hf_extrap_rolloff: bool,
+    enable_highpass: bool,
+    highpass_freq: f64,
+    highpass_transition: f64,
+    enable_lowpass: bool,
+    lowpass_freq: f64,
+    lowpass_transition: f64,
 ) -> (Vec<f64>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
     let nyq = fs / 2.0;
 
@@ -350,10 +398,6 @@ pub fn impulse_from_frd(
 
     let delay_compensation = delay_ms / 1000.0;
 
-    // Store last frequency and magnitude before moving mags_lin
-    let f_last = *freqs.last().unwrap();
-    let mag_last = *mags_lin.last().unwrap();
-
     let mag_interp = Pchip::new_unsorted(freqs.clone(), mags_lin)
         .expect("Failed to create magnitude interpolator");
     let phase_interp = Pchip::new_unsorted(freqs.clone(), phases_rad)
@@ -368,51 +412,25 @@ pub fn impulse_from_frd(
     let mut interp_mag_db = Vec::new();
     let mut interp_phase_deg = Vec::new();
 
-    // For HF roll-off: apply exponential decay from last measured frequency
-    let freqs_ref = &freqs; // Keep reference for later use
-
     for k in 0..=half {
         let f_bin = k as f64 * fs / fft_size as f64;
 
-        let mut mag = if hf_extrap_rolloff && f_bin > f_last {
-            // Apply exponential roll-off beyond last measured frequency
-            let n = freqs_ref.len();
-            if n >= 2 {
-                // Estimate decay rate from last two points
-                let f_prev = freqs_ref[n - 2];
-                let mag_prev_db = mags_db[n - 2];
-                let mag_last_db = mags_db[n - 1];
-
-                // Calculate natural slope in dB/octave
-                let octave_span = (f_last / f_prev).log2();
-                let natural_slope_db_per_oct = if octave_span > 0.0 {
-                    (mag_last_db - mag_prev_db) / octave_span
-                } else {
-                    0.0
-                };
-
-                // Use natural slope if it's negative (roll-off), otherwise force -96 dB/octave
-                let slope_db_per_oct = if natural_slope_db_per_oct < -1.0 {
-                    // Natural roll-off detected, use it but amplify by 2x for stronger decay
-                    natural_slope_db_per_oct * 2.0
-                } else {
-                    // No roll-off or rising, force a -96 dB/octave slope
-                    -96.0
-                };
-
-                let octaves = (f_bin / f_last).log2();
-                let attenuation_db = slope_db_per_oct * octaves;
-                let result = mag_last * 10f64.powf(attenuation_db / 20.0);
-                result.max(1e-20)
-            } else {
-                mag_last.max(1e-20)
-            }
-        } else {
-            mag_interp.interpolate_with_extrap_modes(f_bin, dc_extrap_rolloff, false)
-        };
-
+        // Interpolate magnitude and phase (constant extrapolation)
+        let mut mag = mag_interp.interpolate_with_extrap_modes(f_bin, false, false);
         let phase_interp_raw = phase_interp.interpolate_with_extrapolation(f_bin, false);
-        let mut phase = phase_interp_raw; // - 2.0 * PI * f_bin * delay_compensation;
+        let mut phase = phase_interp_raw;
+
+        // Apply bandpass filter window
+        let filter_window = compute_filter_window(
+            f_bin,
+            enable_highpass,
+            highpass_freq,
+            highpass_transition,
+            enable_lowpass,
+            lowpass_freq,
+            lowpass_transition,
+        );
+        mag *= filter_window;
 
         if !mag.is_finite() || mag < 0.0 {
             mag = 1e-20;
