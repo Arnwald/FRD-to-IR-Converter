@@ -554,3 +554,66 @@ pub fn minimum_phase_transform(impulse: &[f64]) -> Vec<f64> {
         .map(|c| c.re / fft_size as f64)
         .collect()
 }
+
+/// Compute pre-ringing metrics for an impulse response
+/// Returns (pre_energy_percent, peak_index, pre_duration_ms, centroid_shift_ms)
+pub fn compute_preringing_metrics(ir: &[f64], sample_rate: f64) -> (f64, usize, f64, f64) {
+    if ir.is_empty() {
+        return (0.0, 0, 0.0, 0.0);
+    }
+
+    // Add 100ms of delay by rotating to ensure pre-ringing is not truncated
+    let delay_samples = (0.1 * sample_rate) as usize; // 100ms
+    let mut ir_delayed = ir.to_vec();
+    if delay_samples < ir_delayed.len() {
+        ir_delayed.rotate_right(delay_samples);
+    }
+
+    // Find the main peak index (maximum absolute value)
+    let mut peak_idx = 0;
+    let mut peak_val = 0.0;
+    for (i, &val) in ir_delayed.iter().enumerate() {
+        let abs_val = val.abs();
+        if abs_val > peak_val {
+            peak_val = abs_val;
+            peak_idx = i;
+        }
+    }
+
+    // Calculate energy before and after peak
+    let energy: Vec<f64> = ir_delayed.iter().map(|&x| x * x).collect();
+    let e_pre: f64 = energy[..peak_idx].iter().sum();
+    let e_total: f64 = energy.iter().sum::<f64>().max(1e-30);
+    let pre_energy_percent = 100.0 * e_pre / e_total;
+
+    // Calculate pre-duration: from first significant sample to peak
+    // Use dynamic threshold: -60 dB below peak
+    let dynamic_floor = 20.0 * (peak_val / 1000.0).log10(); // -60 dB below peak
+    let mut start_idx = 0;
+    for (i, &val) in ir_delayed[..peak_idx].iter().enumerate() {
+        let mag_db = 20.0 * (val.abs() + 1e-30).log10();
+        if mag_db > dynamic_floor {
+            start_idx = i;
+            break;
+        }
+    }
+    let pre_duration_ms = ((peak_idx - start_idx) as f64 / sample_rate) * 1000.0;
+
+    // Calculate time centroid (energy-weighted)
+    let mut weighted_sum = 0.0;
+    for (i, &e) in energy.iter().enumerate() {
+        weighted_sum += (i as f64) * e;
+    }
+    let centroid_samples = weighted_sum / e_total;
+
+    // For centroid shift, we would need the minimum phase version
+    // For now, we'll compute a simplified metric: distance from peak to centroid
+    let centroid_shift_ms = ((centroid_samples - peak_idx as f64).abs() / sample_rate) * 1000.0;
+
+    (
+        pre_energy_percent,
+        peak_idx,
+        pre_duration_ms,
+        centroid_shift_ms,
+    )
+}

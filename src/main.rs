@@ -2,7 +2,7 @@ mod signal;
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
-use signal::{freqz, impulse_from_frd, parse_frd};
+use signal::{freqz, impulse_from_frd, parse_frd, compute_preringing_metrics};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -40,6 +40,15 @@ struct FrdToIrApp {
     reconstructed_mag_db: Vec<(f64, f64)>,
     reconstructed_phase_deg: Vec<(f64, f64)>,
 
+    // Data quality metrics
+    frd_point_count: usize,
+    expected_point_count: usize,
+    data_coverage_percent: f64,
+    has_dc: bool,
+    has_nyquist: bool,
+    preringing_percent: f64,
+    preringing_duration_ms: f64,
+
     // Parameters (these will be saved)
     sample_rate: f64,
     delay_ms: f64,
@@ -55,6 +64,8 @@ struct FrdToIrApp {
     wrap_phase: bool,
     remove_delay_phase: bool,
     show_filter_window: bool,
+    show_data_info_window: bool,
+    file_path: String,
     #[serde(skip)]
     file_name: String,
 }
@@ -68,6 +79,13 @@ impl Default for FrdToIrApp {
             ir_data: Vec::new(),
             reconstructed_mag_db: Vec::new(),
             reconstructed_phase_deg: Vec::new(),
+            frd_point_count: 0,
+            expected_point_count: 0,
+            data_coverage_percent: 0.0,
+            has_dc: false,
+            has_nyquist: false,
+            preringing_percent: 0.0,
+            preringing_duration_ms: 0.0,
             sample_rate: 96000.0,
             delay_ms: 5.0,
             freq_min: 1.0,
@@ -78,6 +96,8 @@ impl Default for FrdToIrApp {
             wrap_phase: false,
             remove_delay_phase: false,
             show_filter_window: false,
+            show_data_info_window: false,
+            file_path: String::new(),
             file_name: String::new(),
         }
     }
@@ -88,7 +108,23 @@ impl FrdToIrApp {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            let mut app: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            // Reload FRD file if we have a saved path
+            if !app.file_path.is_empty() {
+                if let Ok(text) = std::fs::read_to_string(&app.file_path) {
+                    app.frd_data = parse_frd(&text);
+                    // Restore file name from path
+                    app.file_name = std::path::Path::new(&app.file_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    if !app.frd_data.is_empty() {
+                        app.update_conversion();
+                    }
+                }
+            }
+            return app;
         }
 
         Default::default()
@@ -99,6 +135,7 @@ impl FrdToIrApp {
             .add_filter("FRD Files", &["frd", "FRD", "txt", "TXT"])
             .pick_file()
         {
+            self.file_path = path.to_string_lossy().to_string();
             self.file_name = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -119,16 +156,62 @@ impl FrdToIrApp {
             return;
         }
 
+        // Calculate data quality metrics
+        let nyquist = self.sample_rate / 2.0;
+        let fft_size = (self.sample_rate as usize).next_power_of_two();
+        let freq_resolution = self.sample_rate / fft_size as f64;
+        
+        // Check for DC (0 Hz) and Nyquist frequency
+        self.has_dc = self.frd_data.iter().any(|(f, _, _)| *f == 0.0);
+        self.has_nyquist = self.frd_data.iter().any(|(f, _, _)| (*f - nyquist).abs() < freq_resolution);
+        
+        // Count actual FRD points within Nyquist range
+        self.frd_point_count = self.frd_data.iter()
+            .filter(|(f, _, _)| *f > 0.0 && *f <= nyquist)
+            .count();
+        
+        // Calculate expected number of frequency bins from DC to Nyquist
+        self.expected_point_count = (nyquist / freq_resolution) as usize;
+        
+        // Calculate coverage percentage
+        self.data_coverage_percent = if self.expected_point_count > 0 {
+            (self.frd_point_count as f64 / self.expected_point_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
         // Convert FRD to IR with current parameters
         let (ir, interp_mag, interp_phase) =
             impulse_from_frd(&self.frd_data, self.sample_rate, self.delay_ms);
 
+        // Compute pre-ringing metrics on the original IR (before minimum phase)
+        let (pre_percent, _peak_idx, pre_duration, _centroid_shift) = 
+            compute_preringing_metrics(&ir, self.sample_rate);
+        self.preringing_percent = pre_percent;
+        self.preringing_duration_ms = pre_duration;
+
         // Apply minimum phase transformation if requested
         let ir_final = if self.minimum_phase && !ir.is_empty() {
-            // Apply minimum phase transformation, then restore the delay
-            let ir_min_phase = signal::minimum_phase_transform(&ir);
+            // If pre-ringing is detected and would be truncated, apply extra delay before Hilbert transform
+            let required_delay_ms = pre_duration * 1.5;
+            let needs_extra_delay = required_delay_ms > self.delay_ms;
+            
+            let ir_for_hilbert = if needs_extra_delay {
+                // Apply temporary extra delay to avoid truncating pre-ringing
+                let extra_delay_samples = (required_delay_ms * self.sample_rate / 1000.0) as usize;
+                let mut ir_temp = ir.clone();
+                if extra_delay_samples > 0 && extra_delay_samples < ir_temp.len() {
+                    ir_temp.rotate_right(extra_delay_samples);
+                }
+                ir_temp
+            } else {
+                ir.clone()
+            };
+            
+            // Apply minimum phase transformation
+            let ir_min_phase = signal::minimum_phase_transform(&ir_for_hilbert);
 
-            // Re-apply the delay by rotating the IR
+            // Apply the user-requested delay by rotating the IR
             let delay_samples = (self.delay_ms * self.sample_rate / 1000.0) as usize;
             let mut ir_delayed = ir_min_phase;
             if delay_samples > 0 && delay_samples < ir_delayed.len() {
@@ -234,6 +317,57 @@ impl eframe::App for FrdToIrApp {
 
             if !self.file_name.is_empty() {
                 ui.label(format!("Loaded: {}", self.file_name));
+                
+                // Display data quality information
+                if self.frd_point_count > 0 {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "Data Quality: {} / {} frequency points ({:.1}% coverage)",
+                            self.frd_point_count,
+                            self.expected_point_count,
+                            self.data_coverage_percent
+                        ))
+                        .on_hover_text(
+                            "FRD files typically contain sparse frequency data.\n\
+                            This shows how many data points are present vs. the number needed\n\
+                            for full frequency resolution at the selected sample rate.\n\
+                            Lower coverage means more interpolation is required."
+                        );
+                        
+                        // Color-code the quality indicator
+                        let quality_color = if self.data_coverage_percent >= 50.0 {
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::from_rgb(0, 120, 0) // Much darker green for light mode
+                            }
+                        } else if self.data_coverage_percent >= 20.0 {
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(180, 120, 0)
+                            }
+                        } else {
+                            egui::Color32::RED
+                        };
+                        
+                        ui.colored_label(
+                            quality_color,
+                            if self.data_coverage_percent >= 50.0 {
+                                "Good"
+                            } else if self.data_coverage_percent >= 20.0 {
+                                "Moderate"
+                            } else {
+                                "Low"
+                            }
+                        );
+                        
+                        // Info button to show detailed data issues
+                        if ui.button("Info").clicked() {
+                            self.show_data_info_window = true;
+                        }
+                    });
+                }
             }
 
             ui.separator();
@@ -280,6 +414,31 @@ impl eframe::App for FrdToIrApp {
                     )
                     .changed();
 
+                // Warning if pre-ringing duration exceeds delay (only if minimum phase is disabled)
+                if !self.minimum_phase && self.preringing_duration_ms > self.delay_ms && self.preringing_percent > 0.1 {
+                    ui.label(
+                        egui::RichText::new("\u{26A0}")
+                            .color(if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(180, 120, 0)
+                            })
+                    )
+                    .on_hover_text(
+                        format!(
+                            "Pre-ringing truncation warning\n\n\
+                            Detected pre-ringing duration ({:.1} ms) exceeds the current delay ({:.1} ms).\n\
+                            This may truncate pre-ringing artifacts and introduce discontinuities.\n\n\
+                            Recommended actions:\n\
+                            • Increase delay to at least {:.1} ms, or\n\
+                            • Enable 'Minimum Phase' to eliminate pre-ringing entirely",
+                            self.preringing_duration_ms,
+                            self.delay_ms,
+                            (self.preringing_duration_ms * 1.01).ceil()
+                        )
+                    );
+                }
+
                 ui.add_space(20.0);
 
                 if ui
@@ -297,7 +456,7 @@ impl eframe::App for FrdToIrApp {
                     .on_hover_text(
                         "Applies a Hilbert transform to make the IR causal.\n\n\
                         Many FRD files contain acausal anomalies that cause significant pre-ringing.\n\
-                        This option eliminates all pre-ringing but removes maximum-phase behaviors\n\
+                        This option eliminates all pre-ringing but removes non-minimum phase behaviors\n\
                         (which are corrupted by poorly conditioned FRD files anyway)."
                     )
                     .changed();
@@ -365,7 +524,7 @@ impl eframe::App for FrdToIrApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(200.0);
                     ui.heading("No FRD file loaded");
-                    ui.label("Use File → Open FRD... to load a file");
+                    ui.label("Use File -> Open FRD... to load a file");
                 });
                 return;
             }
@@ -632,5 +791,153 @@ impl eframe::App for FrdToIrApp {
                     });
             });
         });
+        
+        // Data Info Window
+        if self.show_data_info_window {
+            egui::Window::new("Data Quality Information")
+                .open(&mut self.show_data_info_window)
+                .resizable(true)
+                .default_width(500.0)
+                .show(ctx, |ui| {
+                    ui.heading("Issues Detected in FRD File");
+                    ui.separator();
+                    
+                    let mut has_issues = false;
+                    
+                    // Check for missing DC
+                    if !self.has_dc {
+                        has_issues = true;
+                        ui.label(egui::RichText::new("\u{26A0} Missing DC (0 Hz) data point").color(
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(180, 120, 0)
+                            }
+                        ));
+                        ui.label("   The FRD file does not contain a measurement at 0 Hz.");
+                        ui.add_space(10.0);
+                    }
+                    
+                    // Check for missing Nyquist
+                    if !self.has_nyquist {
+                        has_issues = true;
+                        let nyquist = self.sample_rate / 2.0;
+                        ui.label(egui::RichText::new(
+                            format!("\u{26A0} Missing data near Nyquist frequency ({:.0} Hz)", nyquist)
+                        ).color(
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(180, 120, 0)
+                            }
+                        ));
+                        ui.label(format!("   The FRD file does not contain measurements up to {:.0} Hz.", nyquist));
+                        ui.add_space(10.0);
+                    }
+                    
+                    // Check for sparse data
+                    if self.data_coverage_percent < 50.0 {
+                        has_issues = true;
+                        let missing_percent = 100.0 - self.data_coverage_percent;
+                        ui.label(egui::RichText::new(
+                            format!("\u{26A0} Sparse frequency data ({:.1}% missing)", missing_percent)
+                        ).color(egui::Color32::RED));
+                        ui.label(format!(
+                            "   Only {} out of {} expected frequency points are present.",
+                            self.frd_point_count, self.expected_point_count
+                        ));
+                        ui.label(format!(
+                            "   {:.1}% of the frequency data is missing and will be interpolated.",
+                            missing_percent
+                        ));
+                        ui.add_space(10.0);
+                    }
+                    
+                    // Check for pre-ringing
+                    if self.preringing_percent > 0.1 {
+                        has_issues = true;
+                        let severity_color = if self.preringing_percent >= 1.0 {
+                            egui::Color32::RED
+                        } else if self.preringing_percent >= 0.5 {
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::from_rgb(180, 120, 0)
+                            }
+                        } else {
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::from_rgb(100, 200, 255)
+                            } else {
+                                egui::Color32::from_rgb(0, 100, 180)
+                            }
+                        };
+                        
+                        let severity_text = if self.preringing_percent >= 1.0 {
+                            "\u{26A0} Significant pre-ringing detected"
+                        } else if self.preringing_percent >= 0.5 {
+                            "\u{26A0} Moderate pre-ringing detected"
+                        } else {
+                            "\u{26A0} Minor pre-ringing detected"
+                        };
+                        
+                        ui.label(egui::RichText::new(
+                            format!("{} ({:.2}% energy before main peak)", severity_text, self.preringing_percent)
+                        ).color(severity_color));
+                        ui.label(format!(
+                            "   Pre-ring duration: {:.2} ms",
+                            self.preringing_duration_ms
+                        ));
+                        ui.label(
+                            "   This indicates the phase response may have been altered\n\
+                             (smoothing, wrapping errors, or measurement artifacts)."
+                        );
+                        if self.preringing_percent >= 1.0 {
+                            ui.label(
+                                "   This level of pre-ringing will affect transient response and introduce errors with phase correction.\n\
+                                 Consider using 'Minimum Phase' option to eliminate pre-ringing."
+                            );
+                        }
+                        ui.add_space(10.0);
+                    }
+                    
+                    if !has_issues {
+                        ui.label(egui::RichText::new("\u{2713} No major issues detected").color(
+                            if ui.ctx().style().visuals.dark_mode {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::from_rgb(0, 120, 0)
+                            }
+                        ));
+                        ui.label("   The FRD file contains DC, data up to Nyquist, and sufficient frequency points.");
+                    }
+                    
+                    ui.separator();
+                    ui.heading("Impact on Impulse Response");
+                    ui.add_space(5.0);
+                    
+                    ui.label(egui::RichText::new("\u{26A0} Warning").color(egui::Color32::from_rgb(255, 150, 0)));
+                    ui.add_space(5.0);
+                    
+                    ui.label(
+                        "Missing DC data, missing Nyquist data, or sparse frequency coverage can cause\n\
+                        artifacts in the reconstructed impulse response."
+                    );
+                    ui.add_space(5.0);
+                    
+                    ui.label(
+                        "The final impulse may not be fully representative of the original system,\n\
+                        as missing information has been estimated through interpolation and extrapolation."
+                    );
+                    ui.add_space(5.0);
+                    
+                    ui.label(
+                        "For best results, use FRD files with:\n\
+                        • A data point at DC (0 Hz)\n\
+                        • Data extending to at least the Nyquist frequency\n\
+                        • Dense frequency spacing (> 50% coverage)\n\
+                        • Linear frequency spacing if possible"
+                    );
+                });
+        }
     }
 }
